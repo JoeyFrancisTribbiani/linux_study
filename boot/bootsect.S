@@ -30,13 +30,25 @@ go:
         mov sp,dx               # 栈指针指向栈顶
 
 ! 重置最大扇区数
-        push    #0
+        push    #0              # fs:辅助段寄存器,这里用fs:bx来存放软驱参数表源地址
         pop     fs
-        mov bx,#0x78
+        mov bx,#0x78            # fx:bx=0x78
 
         seg fs
-        lgs si,(bx)
+        lgs si,(bx)             # seg表示下一语句中的操作数在fs段寄存器所指的段中，
+                                # 这里把fs:bx处的表地址放到gs:si处作为原地址，寄存器对es:di=0x9000:0xfef4为目的地址
+
+        mov di,dx 
+        mov cx,#6               # 复制12字节，与rep指令配合
+        cld
+        rep                     # 重复执行下一语句，并使cx减一直至cx=0
+        seg gs
+        movw                    # 默认是将ds:si处的一个字移动到es:di，并将si和di按方向位+/-2，这里使用段超越，因此操作数是gs:si，目的地址不变仍是es:di
         
+        mov di,dx               # 之前di变化了，重置为目的地址(复制的表的新地址)
+        movb    4(di),*18       # 将新表中偏移4处的最大扇区数修改为18
+
+
 
 load_setup:
         # 读盘2-4扇区(setup模块)到0x90200
