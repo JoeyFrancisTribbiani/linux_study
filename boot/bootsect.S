@@ -1,7 +1,24 @@
-BOOTSEG = 0X7c0
-INITSEG = 0x900
-SETUPLEN = 4
-SYSSEG = DEF_SYSSEG
+#include <linux/config.h>
+SYSSIZE = DEF_SYSSIZE
+.globl begtext, begdata, begbss, endtext, enddata, endbss
+.text
+begtext:
+.data
+begdata:
+.bss
+begbss:
+.text
+
+SETUPLEN = 4				! nr of setup-sectors
+BOOTSEG  = 0x07c0			! original address of boot-sector
+INITSEG  = DEF_INITSEG			! we move boot here - out of the way
+SETUPSEG = DEF_SETUPSEG			! setup starts here
+SYSSEG   = DEF_SYSSEG			! system loaded at 0x10000 (65536).
+ENDSEG   = SYSSEG + SYSSIZE		! where to stop loading
+
+! ROOT_DEV & SWAP_DEV are now written by "build".
+ROOT_DEV = 0
+SWAP_DEV = 0
 
 entry start
 start:
@@ -46,9 +63,20 @@ go:
         movw                    # 默认是将ds:si处的一个字移动到es:di，并将si和di按方向位+/-2，这里使用段超越，因此操作数是gs:si，目的地址不变仍是es:di
         
         mov di,dx               # 之前di变化了，重置为目的地址(复制的表的新地址)
-        movb    4(di),*18       # 将新表中偏移4处的最大扇区数修改为18
+        movb    4(di),*18       # 将新表中偏移4处(es:di+4)的最大扇区数修改为18
 
+        seg fs
+        mov (bx),di
+        seg fs
+        mov 2(bx),es
 
+        pop ax
+        mov fs,ax
+        mov gs,ax
+
+        xor ah,ah
+        xor dl,dl
+        int 0x13
 
 load_setup:
         # 读盘2-4扇区(setup模块)到0x90200
@@ -72,6 +100,14 @@ load_setup:
 
 ok_load_setup:
         # 获取硬盘参数
+        xor	dl,dl
+	mov	ah,#0x08		! AH=8 is get drive parameters
+	int	0x13
+	xor	ch,ch
+	seg cs
+	mov	sectors,cx
+	mov	ax,#INITSEG
+	mov	es,ax
         # waiting fix
 
 ! 打印加载消息
@@ -93,3 +129,218 @@ ok_load_setup:
         call    print_nl
 
 ! 设置根文件系统
+        seg cs
+        mov ax,root_dev
+        or ax,ax
+        jne root_defined
+
+        seg cs
+        mov bx,sectors
+        mov ax,0x0208
+        cmp bx,#15
+        je      root_defined
+        mov ax,0x021c
+        cmp bx,#18
+        je      root_defined
+
+root_undefined:
+        jmp     root_undefined
+
+root_defined:
+        mov root_dev,ax
+
+        jmpi    0,SETUPSEG
+
+sread:  .word 1+SETUPLEN
+head:   .word 0
+track:  .word 0
+
+read_it:
+        mov ax,es
+        test    ax,0x0fff
+        jnz     die
+
+die:    jmp     die
+
+        xor bx,bx
+
+rp_read:
+        mov ax,es
+        cmp ax,#ENDSEG
+        jb  ok1_read
+
+        ret
+
+ok1_read:
+        seg cs
+        mov ax,sectors
+        sub ax,sread
+        mov cx,ax
+        shl cx,#9
+        add cx,bx
+        jnc ok2_read
+        je  ok2_read
+        xor ax,ax
+        sub ax,bx
+        shr ax,#9
+
+ok2_read:
+	call read_track
+	mov cx,ax
+	add ax,sread
+	seg cs
+	cmp ax,sectors
+	jne ok3_read
+	mov ax,#1
+	sub ax,head
+	jne ok4_read
+	inc track
+
+ok4_read:
+	mov head,ax
+	xor ax,ax
+
+ok3_read:
+	mov sread,ax
+	shl cx,#9
+	add bx,cx
+	jnc rp_read
+        mov ax,es
+	add ah,#0x10
+	mov es,ax
+	xor bx,bx
+	jmp rp_read
+
+read_track:
+	pusha
+	pusha	
+	mov	ax, #0xe2e 	! loading... message 2e = .
+	mov	bx, #7
+ 	int	0x10
+	popa		
+
+	mov dx,track
+	mov cx,sread
+	inc cx
+	mov ch,dl
+	mov dx,head
+	mov dh,dl
+	and dx,#0x0100
+	mov ah,#2
+	
+	push	dx				! save for error dump
+	push	cx
+	push	bx
+	push	ax
+
+	int 0x13
+	jc bad_rt
+	add	sp, #8   	
+	popa
+	ret
+
+bad_rt:	push	ax				! save error code
+	call	print_all			! ah = error, al = read
+	
+	
+	xor ah,ah
+	xor dl,dl
+	int 0x13
+	
+
+	add	sp, #10
+	popa	
+	jmp read_track
+
+
+print_all:
+        mov	cx, #5		! error code + 4 registers
+	mov	bp, sp	
+
+print_loop:
+	push	cx		! save count left
+	call	print_nl	! nl for readability
+	jae	no_reg		! see if register name is needed
+	
+	mov	ax, #0xe05 + 0x41 - 1
+	sub	al, cl
+	int	0x10
+
+	mov	al, #0x58 	! X
+	int	0x10
+
+	mov	al, #0x3a 	! :
+	int	0x10
+
+no_reg:
+	add	bp, #2		! next register
+	call	print_hex	! print it
+	pop	cx
+	loop	print_loop
+	ret
+
+print_nl:
+	mov	ax, #0xe0d	! CR
+	int	0x10
+	mov	al, #0xa	! LF
+	int 	0x10
+	ret
+
+/*
+ *	print_hex is for debugging purposes, and prints the word
+ *	pointed to by ss:bp in hexadecmial.
+*/
+
+print_hex:
+	mov	cx, #4		! 4 hex digits
+	mov	dx, (bp)	! load word into dx
+print_digit:
+	rol	dx, #4		! rotate so that lowest 4 bits are used
+	mov	ah, #0xe	
+	mov	al, dl		! mask off so we have only next nibble
+	and	al, #0xf
+	add	al, #0x30	! convert to 0 based digit, '0'
+	cmp	al, #0x39	! check for overflow
+	jbe	good_digit
+	add	al, #0x41 - 0x30 - 0xa 	! 'A' - '0' - 0xa
+
+good_digit:
+	int	0x10
+	loop	print_digit
+	ret
+
+
+/*
+ * This procedure turns off the floppy drive motor, so
+ * that we enter the kernel in a known state, and
+ * don't have to worry about it later.
+ */
+kill_motor:
+	push dx
+	mov dx,#0x3f2
+	xor al, al
+	outb
+	pop dx
+	ret
+
+sectors:
+	.word 0
+
+msg1:
+	.byte 13,10
+	.ascii "Loading"
+
+.org 506
+swap_dev:
+	.word SWAP_DEV
+root_dev:
+	.word ROOT_DEV
+boot_flag:
+	.word 0xAA55
+
+.text
+endtext:
+.data
+enddata:
+.bss
+endbss:
